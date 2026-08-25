@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "official_release": {
+    "publisher": "PJLab-ADG/DetZero",
+    "repository": "https://github.com/PJLab-ADG/DetZero",
+    "folder_url": "https://drive.google.com/drive/folders/1SUzMox9oNte_DYkeceERDSNMWvKKUeGn",
+    "enumerated_checkpoint_count": 6,
+    "license_notice": "The DetZero README states that the released models follow the Waymo Open Dataset non-commercial terms."
+  },
+  "verification": {
+    "method": "Fresh isolated gdown folder download followed by local SHA-256 and byte-size comparison",
+    "official_checkpoint_count": 6,
+    "local_checkpoint_count": 6,
+    "all_public_release_files_present_and_identical": true
+  },
+  "checkpoints": [
+    {
+      "name": "cyclist_grm_model.pth",
+      "drive_file_id": "11d1JQBSiy64vVAzS1lcAhkUA15XPzQBn",
+      "bytes": 16381633,
+      "sha256": "92c101f98340d4f5bcf746f47cf5290bab734e6ec846f1404fcde47c86139990",
+      "local_path": "checkpoints/cyclist_grm_model.pth",
+      "status": "present_and_byte_identical"
+    },
+    {
+      "name": "cyclist_prm_model.pth",
+      "drive_file_id": "1fF6B5zxyAJbilpLMqjX9VHWDR1irOMWR",
+      "bytes": 14711261,
+      "sha256": "95f2bde035f1faddff62c24adc787d97ddf64f73251b05bba5da3cbc9b6995b0",
+      "local_path": "checkpoints/cyclist_prm_model.pth",
+      "status": "present_and_byte_identical"
+    },
+    {
+      "name": "pedestrian_grm_model.pth",
+      "drive_file_id": "1YWXoLF8yY9kUHxquozmlNnFKXkVmCLD1",
+      "bytes": 16381633,
+      "sha256": "f47cf8f5e9516a12a80fb77133317bf1c1ed8a570fb7025f8ba92ddb9789d385",
+      "local_path": "checkpoints/pedestrian_grm_model.pth",
+      "status": "present_and_byte_identical"
+    },
+    {
+      "name": "pedestrian_prm_model.pth",
+      "drive_file_id": "1MZZGqiiXamchMDlth_b5eriPFehJivW8",
+      "bytes": 14702045,
+      "sha256": "31d2382f50cb02e786a3bd878a001ce984d48cbcbed829edbea427174da9a69f",
+      "local_path": "checkpoints/pedestrian_prm_model.pth",
+      "status": "present_and_byte_identical"
+    },
+    {
+      "name": "vehicle_grm_model.pth",
+      "drive_file_id": "1ZhNqHYoPxnMKGxxEa0YrpnEZ3Vq0My0i",
+      "bytes": 16381633,
+      "sha256": "05f3b293d70f9b6a24486a9cfb93d9cb5a053f3987f65ffe11bc6ba44d2ba599",
+      "local_path": "checkpoints/vehicle_grm_model.pth",
+      "status": "present_and_byte_identical"
+    },
+    {
+      "name": "vehicle_prm_model.pth",
+      "drive_file_id": "124a9J7xPGRWWXFlDhnIxtjLn7l-c0N7_",
+      "bytes": 14702045,
+      "sha256": "32c757c1900bfe263a8b3786b91575092c35770dfc3b0b000a4b3636c0204fe5",
+      "local_path": "checkpoints/vehicle_prm_model.pth",
+      "status": "present_and_byte_identical"
+    }
+  ],
+  "complete_pipeline_assets_not_in_official_release": [
+    {
+      "stage": "detection",
+      "asset": "Waymo-trained DetZero-compatible CenterPoint checkpoint",
+      "status": "not_published_by_detzero",
+      "evidence": "https://github.com/PJLab-ADG/DetZero/issues/49"
+    },
+    {
+      "stage": "refining",
+      "asset": "Vehicle/Pedestrian/Cyclist CRM checkpoints",
+      "status": "not_published_by_detzero",
+      "evidence": "https://github.com/PJLab-ADG/DetZero/issues/66"
+    }
+  ],
+  "tracking": {
+    "learned_checkpoint_required": false,
+    "implementation": "Configured Kalman-filter/data-association pipeline"
+  }
+}

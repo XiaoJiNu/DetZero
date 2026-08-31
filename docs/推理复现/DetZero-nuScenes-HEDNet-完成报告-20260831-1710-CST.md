@@ -1,0 +1,64 @@
+# DetZero × nuScenes × HEDNet 真值生成 — 完成报告
+
+> 时间：2026-08-31 CST ｜ 工作区：`DetZero-nuscenes-hednet-qwen3.8flash`（分支 `nuscenes-hednet-qwen3.8flash`）
+> 方案：`docs/推理复现/DetZero-nuScenes-HEDNet-qwen3.8flash方案20260831.md` ｜ 状态：**链路 PASS / 效果 NOT_ESTABLISHED（tracking 环节被 GT 量化裁决为退化）**
+
+## 0. 结论先行
+
+| 维度 | 判定 | 依据 |
+| --- | --- | --- |
+| 可执行性 | **PASS** | S1→S6 两 scene（0103/40 帧、0916/41 帧）全部跑通，visuals 逐帧非空，全部产物带 sha256 manifest |
+| 效果 | **NOT_ESTABLISHED** | R1 成立：Waymo tracking 在 nuScenes 2Hz 上把 mAP 从 0.74/0.83 打到 0.027，Pedestrian/Cyclist 轨迹全灭。R3 排除：pose 与坐标链实测零误差，退化是域差不是 bug |
+| 发布就绪 | **不在范围** | 与方案 §0 一致：不接 coordinator、无 receipt/Release |
+
+**一句话：DetZero 下游对 HEDNet-nuScenes 检测框的正确处理链已打通并证明坐标系无误，但"tracking+GRM/PRM 能提升 nuScenes 框质量"这一假设被 GT 量化否决——按方案 §2.1 R2 预案 fail-closed，正式真值输出应停在 detector 层。**
+
+## 1. 交付物（全部在 worktree 内，未动 Waymo Stage-A 任何文件）
+
+新增脚本（方案 §3.1 预告的 3 个）：
+- `tools/external_detector/preprocess_nuscenes_scene.py` — S1
+- `tools/external_detector/adapt_hednet_to_detzero.py` — S2
+- `tools/external_detector/eval_nus_vs_gt.py` — S7
+
+产物 generation root：`output/nus-stage-a-20260831-165710-CST/scene-{0103,0916}/`，每 scene 含
+`data/`（Waymo 布局，无 GT）、`detector/`、`tracking/`、`refining/`、`final/`、`visuals/`（40/41 张 BEV png）、`eval_metric_report.json`；另有 `*-dt05` 变体（R1 对照实验，§4）。
+
+## 2. 验收门逐条
+
+| 门 | 结果 | 证据 |
+| --- | --- | --- |
+| G1 链路 | **PASS** | 两 scene S1→S6 exit 0；render_manifest 40/41 帧、逐帧 point_count>0、png 数=期望帧数 |
+| G2 一致性 | **PASS** | R3 pose 对拍：`car_from_global`≡global→ego、`ref_from_car`≡ego→lidar，与 devkit 表误差 **0.0**；tracking 框经 `inv(pose)` 回 lidar 系后与 detector 源框最近邻距离中位 **0.00m** |
+| G3 效果报告 | **PASS（按 fail-closed 如实记录）** | 三级 mAP 齐备（§3），R1=DEGRADED 如实判负 |
+| G4 边界 | **PASS** | `git status`：0 个已跟踪文件改动；新增仅 tools/external_detector/ 3 脚本 + docs/ + output/ |
+
+## 3. 核心数字（BEV 中心距 AP，0.5/1/2m 均值，≤50m，nuScenes 3 类映射）
+
+| 阶段 | 0103 mAP | 0916 mAP | 0103 各类 | 0916 各类 |
+| --- | --- | --- | --- | --- |
+| detector (HEDNet) | **0.743** | **0.826** | V .757 / P .839 / C .633 | V .895 / P .916 / C .668 |
+| +tracking | 0.027 | 0.027 | V .082 / P 0 / C 0 | V .081 / P 0 / C 0 |
+| +GRM/PRM (no-CRM) | 0.026 | 0.028 | V .079 / P 0 / C 0 | V .084 / P 0 / C 0 |
+
+GT 量级（scene-0103）：Vehicle 866 / Pedestrian 857 / Cyclist 47 框。detector 召回正常，说明评估器与类别映射工作正确。
+
+## 4. 风险裁决与根因
+
+- **R1 tracking 碎片化：成立（DEGRADED）。** detector 2769/2615 框 → tracking 仅剩 14/22 条轨迹，且全部是 Vehicle：Pedestrian/Cyclist 在 2Hz、0.4-0.5s 帧距下跨帧 IoUBEV 关联断链，随后被 `empty_track_delete LEAST_AGE: 5`（age≥5 才保命）整类删除——dropped.pkl 中可见 Ped 54+68、Cyc 16+43 框成批被丢。对照实验：按方案授权把 Kalman `DELTA_T` 0.1→0.5（`tracking-dt05` 全套重跑），mAP 0.026/0.054，仍判 DEGRADED；碎片化主因是 Waymo 域关联门限 + 最短轨迹年龄约束，非 dt 单一参数。
+- **R2 GRM/PRM 域差：无法翻案也无需翻案。** final 相对 tracking 的 ΔmAP 在 ±0.02 内（0.027→0.026 / 0.027→0.028），NOT_DEGRADED——但这是在 tracking 已塌陷到 0.027 的地板上比较，GRM/PRM 对 Vehicle 轨迹有微幅正修正（0916: .081→.084），不构成可用性。
+- **R3 pose 约定：排除。** 见 G2；S1 用 `inv(car_from_global @ ref_from_car)` 作 lidar→global，链路逆变换往返误差 0.00m。
+- **R4 类别折叠：如设计执行。** manifest 记录丢弃 traffic_cone 140+37、barrier 7+7。
+
+## 5. 对方案的两处偏离（均为方案错误，实测纠正）
+
+1. **方案 §3.2-S1"补第 6 列 0"不可行**：`daemon/prepare_object_data.py:270-271` 按 `col5 == -1` 过滤 Waymo 首次回波，填 0 会把 nuScenes 全部点滤光、GRM/PRM 输入为空。实际填 **-1**（nuScenes 单回波=首回波），intensity 列同时按方案 ×255。
+2. **方案 §3.3-S3 运行目录写错**：`run_track.py` 的 `_BASE_CONFIG_: cfgs/...` 相对路径要求 cwd=`tracking/tools` 且 cfg 用绝对路径——正式 `run_stage_a.py:450,478` 本来就是这么调度的（`execution_root/tracking/tools`），照抄即可，非新问题。
+
+## 6. 真值标签产出建议（fail-closed）
+
+本批 81 帧的可用真值 = **detector 层框**（`detector/hednet_frames_*.pkl`，0.74/0.83 mAP、含速度），而非 tracking/refined 输出。若要让 DetZero 下游在 nuScenes 域可用，需要的最小改动是（本方案未做，不擅自扩界）：tracking cfg 的关联门限与 `LEAST_AGE` 按 2Hz 重标、或放宽保命条件；根治则需要 nuScenes 域的运动模型参数集。GRM/PRM 权重不动权重合同的前提下无解（域差）。
+
+## 7. 环境备忘
+
+- 全部命令用 `mv2d` env python（与 Waymo Stage-A 同款）；CUDA 扩展 `.so` 不在 git 内，worktree 从主仓 `utils/` 复制（已 gitignore，不进提交）。
+- 复现命令序列已固化在各 manifest 的 provenance 相对路径中；正式命令清单见 `output/nus-stage-a-20260831-165710-CST/`。

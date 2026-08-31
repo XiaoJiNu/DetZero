@@ -62,3 +62,26 @@ GT 量级（scene-0103）：Vehicle 866 / Pedestrian 857 / Cyclist 47 框。dete
 
 - 全部命令用 `mv2d` env python（与 Waymo Stage-A 同款）；CUDA 扩展 `.so` 不在 git 内，worktree 从主仓 `utils/` 复制（已 gitignore，不进提交）。
 - 复现命令序列已固化在各 manifest 的 provenance 相对路径中；正式命令清单见 `output/nus-stage-a-20260831-165710-CST/`。
+
+---
+
+## 8. 增补（20260831-1735）：修订路线 §5 已实现 — 自研无 Waymo 跟踪出真值
+
+新脚本 `tools/external_detector/track_hednet_boxes.py`（纯 numpy/scipy，零学习组件）：
+匈牙利分配 + 全局系 EMA 有限差分速度外推，门限 Vehicle 6.0 / Cyc 3.0 / Ped 2.0m，max_age=3，尺寸=轨迹内 score 加权中值平滑。
+
+**两处与方案的偏差由实测裁定**（§5.2 原设计据此修订）：
+1. **不用 HEDNet vx/vy 做外推**：与 GT 位移对拍，其角度中位误差 31°、161°（lidar 系解释）——速度头不可信；改用轨迹自身差分速度，ID switch 从 89→56（0103）。vx/vy 仍原样写入真值框。
+2. **门限按测得的帧间抖动定，不按物理尺寸**：2Hz 下 detector 同目标相邻帧中心漂移 2~5m，物理尺寸门限（2.5m）导致 86% 单帧轨迹；放宽后 obs/track 1.2→2.4（0103）/4.6（0916），0916 Vehicle 最长轨迹 40 帧=全片。
+
+结果（scene-0103 / 0916）：
+
+| 指标 | detector | 自研跟踪 | 判据 G3'（≥det−0.02） |
+| --- | --- | --- | --- |
+| mAP | 0.743 / 0.826 | **0.743 / 0.826** | **PASS**（不破坏中心） |
+| 尺寸 L1 误差 vs GT | 0.160 / 0.151 | **0.144 / 0.148** | 平滑带来 −4%/−2% |
+| R1 判定 | — | NOT_DEGRADED | Waymo 版为 DEGRADED |
+
+产物：`scene-*/track/hednet_tracked_frames_*.pkl`（**真值输出**，schema 同 S2 帧列表，含逐帧框+轨迹号）+ `hednet_tracks_*.pkl`（按目标组织）+ `eval_metric_report_selftrack.json` + `visuals-selftrack/`（81 张）。GRM/PRM/CRM 未运行。
+
+诚实边界：0103 行人碎片化仍偏多（persistent GT 71 个中 32 个被切成 ≥4 段、长轨迹 ID switch 56/103）——2Hz + detector 抖动下无外观特征的纯几何跟踪的固有上限；真值框质量不受影响（mAP/尺寸已证），受影响的仅是轨迹 ID 连续性。需要更稳 ID 时再上外观特征（方案 §5 范围外）。

@@ -29,6 +29,8 @@ CLASSES = ("Vehicle", "Pedestrian", "Cyclist")
 def load_frame_boxes(path: Path, tracking_style: bool):
     """-> {frame_id: {class: (boxes[N,3+], scores[N])}} in lidar frame."""
     data = pickle.load(path.open("rb"))
+    if isinstance(data, list):
+        tracking_style = False  # frame-list schema (detector / tracked frames)
     per_frame = {}
     if tracking_style:  # dict seq -> obj -> track arrays (global boxes)
         for tracks in data.values():

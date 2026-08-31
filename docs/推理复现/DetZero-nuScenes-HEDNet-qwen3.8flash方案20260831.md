@@ -1,6 +1,8 @@
 # DetZero × nuScenes × HEDNet 真值生成方案
 
 > 时间：2026-08-31 CST ｜ 模型：qwen3.8-flash ｜ 性质：可行性分析与实施方案（含未执行命令，标注为"计划"）
+>
+> **20260831-1730 修订**：原 S3–S5（Waymo tracking + GRM/PRM）已被 GT 量化判负（见完成报告 20260831）。现行路线改走 **§5：detector → 自研轻量跟踪 → 真值**，不再使用任何 Waymo 训练权重/调参/后处理。S1/S2/S6/S7 与产物布局全部复用。
 
 ## 0. 结论先行
 
@@ -159,3 +161,35 @@ $P tools/external_detector/render_waymo_sequence.py \
 ## 4. 与 Waymo Stage-A 报告的差异说明
 
 本方案沿用其"外部 detector → adapter → tracking → GRM/PRM → no-CRM final → visuals"骨架与全部下游权重（Waymo 3 类），差别只在：detector 换成 HEDNet（自带速度、框格式直通）、数据源换成 nuScenes-mini（自带 GT）、以及**放弃其机械发布链**换取快速闭环——效果结论因此天然可建立（有 GT），这是 Waymo testing 段做不到的。
+
+---
+
+## 5. 修订路线（20260831-1730）：detector → 自研轻量跟踪 → 真值
+
+### 5.1 为什么
+
+原 S3-S5 复用 Waymo 训练的 tracking（10Hz 调参 + LEAST_AGE:5 保命门限）与 GRM/PRM 权重，GT 量化裁决 R1=DEGRADED（mAP 0.74→0.027，Ped/Cyc 整类被删），对照实验证明调 DELTA_T 无法翻案——是域差。因此：**跟踪要做，但必须用不依赖 Waymo 权重/参数/后处理的自研最小实现；GRM/PRM/CRM 全部砍掉。**
+
+### 5.2 设计（纯 numpy/scipy，无任何学习组件）
+
+新脚本 `tools/external_detector/track_hednet_boxes.py`（T1，~150 行），SORT 式恒速跟踪：
+
+- **运动模型**：直接用 HEDNet 框自带的 vx/vy（lidar 系）做恒速外推 `x+vx·dt`，dt 取 S1 info 的真实时间戳差（2Hz≈0.5s），零拟合参数。
+- **关联**：每类独立，代价 = BEV 中心距（外推后），匈牙利最优分配（scipy.linear_sum_assignment，已装），门限按物理尺寸放宽：Vehicle 2.5m / Cyclist 1.5m / Pedestrian 1.0m；超门槛视为新目标。
+- **轨迹管理**：`max_age=2`（丢 2 帧断轨，容忍偶发漏检）、`min_hits=1`（不设 DetZero 式年龄保命门限——它正是 2Hz 下整类误删行人/骑车人的根因）。
+- **真值平滑**（"跟踪优化"的全部替代）：每条轨迹的 (l,w,h) 取按 score 加权的**中值**（去抖），中心/朝向/速度保留逐帧原值；输出即最终真值框。
+- **输出合同**：帧列表 schema 与 S2 detector 帧完全同构（可直接喂 S6 render 的 --final-frames 与 S7）；同时输出 tracking.pkl 同构 dict 供追溯。
+
+### 5.3 步骤（复用既有件）
+
+```
+S1 data ──► S2 detector pkl ──► T1 track_hednet_boxes.py ──► track/hednet_tracked_frames_<scene>.pkl
+                                                        └──► track/hednet_tracks_<scene>.pkl
+S6 render(--detector-frames=S2, --final-frames=T1帧输出)   S7 eval(detector vs T1 帧输出)
+```
+
+验收门沿用 §3.4，改判据为 **G3'：T1 跟踪+中值平滑后的 mAP ≥ detector mAP − 0.02**（跟踪最多因删轨迹丢一点召回，不得引入位移/尺寸退化）；R2/R3 语义不变。
+
+### 5.4 明确不做
+
+GRM/PRM/CRM、Waymo tracking cfg/权重/DetZero post-process（motion_classify、static_drift_eliminate、track_merge）一概不碰；不改 S1/S2。

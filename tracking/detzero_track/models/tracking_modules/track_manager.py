@@ -127,9 +127,20 @@ class TrackManager():
                 for k, v in items.items():
                     items[k] = np.array(v)
 
+            empty_track_data = {
+                'start': np.zeros(0, dtype=np.int8),
+                'boxes_global': np.zeros((0, 9), dtype=np.float32),
+                'name': np.asarray([], dtype='<U1'),
+                'score': np.zeros(0, dtype=np.float32),
+                'sample_idx': np.asarray([], dtype='<U1'),
+                'hit': np.zeros(0, dtype=np.int8),
+                'num_points': np.zeros(0, dtype=np.int64),
+                'obj_ids': np.zeros(0, dtype=np.int64),
+            }
             for idx, frm_id in enumerate(frame_list[::-1]):
                 frm_tk_data, reverse_tracks = self.reverse_tracking_module(
-                    frm_id, data_dict[frm_id], frm_tracks[frm_id], reverse_tracks
+                    frm_id, data_dict[frm_id],
+                    frm_tracks.get(frm_id, empty_track_data), reverse_tracks
                 )
                 for key, val in frm_tk_data.items():
                     for sub_key, sub_val in val.items():
@@ -217,7 +228,7 @@ class TrackManager():
 
     def reverse_tracking_module(self, frame_id, det_data, trk_data, tracks):
         track_data = self.predict_tracks(frame_id, tracks)
-        trk_mask = ~ trk_data['start'].astype(np.bool)
+        trk_mask = ~ trk_data['start'].astype(bool)
 
         for key in track_data.keys():
             track_data[key] = np.concatenate((
@@ -261,7 +272,7 @@ class TrackManager():
 
     def overlap_track_merge(self, tracks):
         tk_boxes = np.zeros((len(tracks), 7), dtype=np.float32)
-        tk_age = np.zeros(len(tracks), dtype=np.int)
+        tk_age = np.zeros(len(tracks), dtype=int)
         tk_area = np.zeros(len(tracks), dtype=np.float32)
         tk_name = list()
 

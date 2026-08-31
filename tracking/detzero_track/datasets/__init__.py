@@ -9,12 +9,13 @@ __all__ = {
 
 
 def build_dataloader(dataset_cfg, log_time, data_path, batch_size, 
-                     workers, split, logger, root_path=None):
+                     workers, split, logger, root_path=None, output_path=None):
     dataset = __all__[dataset_cfg.DATASET](
         dataset_cfg=dataset_cfg,
         data_path=data_path,
         split=split,
         root_path=root_path,
+        output_path=output_path,
         log_time=log_time,
         logger=logger
     )

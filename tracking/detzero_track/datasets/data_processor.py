@@ -17,7 +17,9 @@ class DataProcessor(object):
     def __init__(self, processor_configs, lidar_path=None):
         self.data_processor_queue = []
         self.lidar_path = lidar_path
-        self.ignore_key_list = ['sequence_name', 'timestamp', 'pose', 'frame_id']
+        self.ignore_key_list = [
+            'sequence_name', 'timestamp', 'pose', 'frame_id', 'sample_idx'
+        ]
         
         for cur_cfg in processor_configs:
             cur_processor = getattr(self, cur_cfg.NAME)(config=cur_cfg)

@@ -1,3 +1,4 @@
+import os
 import pickle
 
 from tqdm import tqdm
@@ -49,15 +50,19 @@ def run_model(model, dataloader, dataset, workers, cfgs=None, logger=None):
         drop_data.update(dict(zip(seq_names, data_dicts['det_drop'])))
 
     track_path = dataset.get_track_path()
-    with open(track_path, 'wb') as f:
+    with open(track_path, 'xb') as f:
         if dataset.assign_mode:
             pickle.dump(assign_data, f)
         else:
             pickle.dump(track_data, f)
+        f.flush()
+        os.fsync(f.fileno())
 
     drop_path = dataset.get_drop_path()
-    with open(drop_path, 'wb') as f:
+    with open(drop_path, 'xb') as f:
         pickle.dump(drop_data, f)
+        f.flush()
+        os.fsync(f.fileno())
 
     if logger is not None:
         logger.info(get_log_info('Tracking module running finished!'))

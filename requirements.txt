@@ -2,6 +2,7 @@ numpy<=1.19.5
 numba==0.48.0
 tensorboardX
 easydict
+filterpy==1.4.5
 pyyaml
 tqdm
 opencv-python

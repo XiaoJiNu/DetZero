@@ -556,6 +556,7 @@ def run_checkpoint(
     class_name: str,
     model_kind: str,
     device: str = "cuda",
+    checkpoint_root: str | Path | None = None,
 ) -> InferenceResult:
     """Load every checkpoint tensor and execute one real model forward pass."""
     import torch
@@ -574,8 +575,11 @@ def run_checkpoint(
         dataset=prepared.dataset,
     )
 
-    checkpoint_path = REPO_ROOT / "checkpoints" / _CHECKPOINT_NAMES[(class_name, model_kind)]
-    if not checkpoint_path.is_file():
+    checkpoint_root = Path(checkpoint_root or REPO_ROOT / "checkpoints").resolve(
+        strict=True
+    )
+    checkpoint_path = checkpoint_root / _CHECKPOINT_NAMES[(class_name, model_kind)]
+    if checkpoint_path.is_symlink() or not checkpoint_path.is_file():
         raise FileNotFoundError(checkpoint_path)
     checkpoint = _load_checkpoint(checkpoint_path, map_location=torch.device("cpu"))
     checkpoint_state = checkpoint["model_state"]

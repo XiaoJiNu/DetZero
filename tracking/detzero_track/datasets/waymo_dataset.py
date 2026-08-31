@@ -1,10 +1,10 @@
 from collections import defaultdict
 import os
-import pickle
 
 import numpy as np
  
 from detzero_utils.common_utils import get_log_info
+from tools.external_detector.safe_io import safe_load_pickle
 
 from detzero_track.utils.data_utils import sequence_list_to_dict
 from .dataset import DatasetTemplate
@@ -15,8 +15,11 @@ class WaymoTrackDataset(DatasetTemplate):
     The Dataset class for Tracking on Waymo
     """
     def __init__(self, dataset_cfg, data_path, log_time, split,
-                 root_path=None, logger=None):
+                 root_path=None, output_path=None, logger=None):
         super().__init__(dataset_cfg, data_path, split, root_path, logger)
+        if output_path is None or not os.path.isdir(output_path):
+            raise ValueError('output_path must be a prepared fresh directory')
+        self.output_path = str(output_path)
         if self.logger:
             self.logger.info(get_log_info('Initialize {}'.format(self.dataset_cfg.DATASET)))
 
@@ -32,15 +35,10 @@ class WaymoTrackDataset(DatasetTemplate):
         self.track_module_path = defaultdict(dict)
 
         # set the desitation path of tracking result
-        track_path = os.path.join(self.root_path, 'tracking')
-        if not os.path.exists(track_path):
-            os.makedirs(track_path)
-        
         self.track_module_path['tracking'] = os.path.join(
-            track_path, '-'.join(['tracking', self.split, self.logtime]))
+            self.output_path, 'tracking.pkl')
         self.track_module_path['det_drop'] = os.path.join(
-            track_path, '-'.join(['drop', self.split, self.logtime])
-        )
+            self.output_path, 'dropped.pkl')
 
         # set the path of detection prediction results
         self.track_module_path['detection'] = self.det_path
@@ -49,8 +47,7 @@ class WaymoTrackDataset(DatasetTemplate):
         self.gt_path = os.path.join(self.root_path, 'waymo_infos_%s.pkl' % self.split)
 
     def init_infos(self):
-        with open(self.track_module_path['detection'], 'rb') as f:
-            raw_det = pickle.load(f)
+        raw_det = safe_load_pickle(self.track_module_path['detection'])
 
         if isinstance(raw_det, list):
             det_info = sequence_list_to_dict(raw_det)
@@ -63,8 +60,7 @@ class WaymoTrackDataset(DatasetTemplate):
         self.seq_det_infos = [det_info[seq_n] for seq_n in self.seq_name_list]
 
         if self.assign_mode:
-            with open(self.gt_path, 'rb') as f:
-                raw_gt_infos = pickle.load(f)
+            raw_gt_infos = safe_load_pickle(self.gt_path)
 
             gt_infos = sequence_list_to_dict(raw_gt_infos)
             if len(gt_infos.keys()) != len(self.seq_name_list):
@@ -100,10 +96,10 @@ class WaymoTrackDataset(DatasetTemplate):
         """
         Get tracking path. 
         """
-        return self.track_module_path['tracking'] + '.pkl'
+        return self.track_module_path['tracking']
     
     def get_drop_path(self):
         """
         Get tracking path. 
         """
-        return self.track_module_path['det_drop'] + '.pkl'
+        return self.track_module_path['det_drop']

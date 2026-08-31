@@ -31,7 +31,9 @@ class BaseKalmanFilter:
         self.x = np.zeros((x_dim, 1), dtype=np.float32)
         self.x[:z_dim, :] = copy.deepcopy(bbox[:3].reshape(3, 1))
 
-        self.bbox = np.zeros((bbox.shape[0]+2), dtype=np.float32)
+        if bbox.ndim != 1 or bbox.shape[0] not in (7, 9):
+            raise ValueError('bbox must contain 7 geometry or 9 geometry/velocity values')
+        self.bbox = np.zeros(9, dtype=np.float32)
         self.bbox[:bbox.shape[0]] = copy.deepcopy(bbox)
 
         self.F = np.eye(x_dim, dtype=np.float32)

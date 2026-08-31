@@ -57,7 +57,7 @@ class associate_det_to_tracks:
         cost_matrix = 1.0 - affinity_maxtrix
         matched, tarck_unmatch, det_unmatch = self.assignment_method(cost_matrix)
 
-        return matched, tarck_unmatch, det_unmatch, np.zeros(matched.shape[0], dtype=np.int)
+        return matched, tarck_unmatch, det_unmatch, np.zeros(matched.shape[0], dtype=int)
 
     def two_stage(self, det_data, track_data):
         det_box = det_data['boxes_global']
@@ -73,7 +73,7 @@ class associate_det_to_tracks:
 
         if track_box.shape[0] == 0:
             det_unmatch = np.flatnonzero(np.greater_equal(num_pts_in_det, point_thresholds))
-            return np.zeros((0, 2), dtype=np.int), np.arange(0), det_unmatch, np.zeros_like(det_unmatch)
+            return np.zeros((0, 2), dtype=int), np.arange(0), det_unmatch, np.zeros_like(det_unmatch)
 
         first_mask = np.greater_equal(det_score, score_thresholds) & np.greater_equal(num_pts_in_det, point_thresholds)
         first_det_index = np.flatnonzero(first_mask)
@@ -91,7 +91,7 @@ class associate_det_to_tracks:
         second_det_mask = ~first_mask
         second_det_idx = np.flatnonzero(second_det_mask)
 
-        second_trk_mask = np.zeros(track_box.shape[0], dtype=np.bool)
+        second_trk_mask = np.zeros(track_box.shape[0], dtype=bool)
         second_trk_mask[tarck_unmatch] = True
         second_trk_idx = np.flatnonzero(second_trk_mask)
 
@@ -112,7 +112,7 @@ class associate_det_to_tracks:
         second_matched[:, 1] = second_det_idx[second_matched[:, 1]]
 
         matched = np.concatenate((first_matched, second_matched), axis=0)
-        matched_stage = np.zeros(matched.shape[0], dtype=np.int)
+        matched_stage = np.zeros(matched.shape[0], dtype=int)
         matched_stage[:first_matched.shape[0]] = 0
         matched_stage[first_matched.shape[0]:] = 1
 
@@ -138,7 +138,7 @@ class associate_det_to_tracks:
 
         if track_box.shape[0] == 0:
             det_unmatch = np.flatnonzero(np.greater_equal(num_pts_in_det, point_thresholds))
-            return np.zeros((0, 2), dtype=np.int), np.arange(0), det_unmatch
+            return np.zeros((0, 2), dtype=int), np.arange(0), det_unmatch
 
         first_mask = np.greater_equal(det_score, score_thresholds) & np.greater_equal(num_pts_in_det, point_thresholds)
         second_det_mask = ~first_mask

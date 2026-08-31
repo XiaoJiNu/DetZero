@@ -16,7 +16,7 @@ def GNN_assignment(cost_matrix, threshold=1.):
     """
     N, M = cost_matrix.shape
     if N == 0 or M == 0:
-        return np.zeros((0, 2), dtype=np.int), np.arange(N), np.arange(M)
+        return np.zeros((0, 2), dtype=int), np.arange(N), np.arange(M)
 
     # give a large num to avoid unmatched affect the global optim
     cost_matrix[cost_matrix >= threshold] = 5000.
@@ -29,7 +29,7 @@ def GNN_assignment(cost_matrix, threshold=1.):
 
     if len(matched_list):
         matched_list = np.array(matched_list)
-    else: matched_list = np.empty((0, 2), dtype=np.int)
+    else: matched_list = np.empty((0, 2), dtype=int)
 
     unmatched1_list = list()
     unmatched2_list = list()
@@ -38,7 +38,7 @@ def GNN_assignment(cost_matrix, threshold=1.):
     for idx in range(M):
         if idx not in matched_list[:, 1]: unmatched2_list.append(idx)
 
-    return matched_list, np.array(unmatched1_list, dtype=np.int), np.array(unmatched2_list, dtype=np.int)
+    return matched_list, np.array(unmatched1_list, dtype=int), np.array(unmatched2_list, dtype=int)
 
 
 def bev_overlap_gpu(boxes_a, boxes_b):

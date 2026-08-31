@@ -2,14 +2,19 @@ import os
 import argparse
 import yaml
 from easydict import EasyDict
-from pathlib import Path
 import pickle
+from pathlib import Path
+import sys
 
 import numpy as np
 import torch
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+
 from detzero_utils.common_utils import create_logger, multi_processing
 from detzero_utils.ops.roiaware_pool3d.roiaware_pool3d_utils import points_in_boxes_gpu_v2
+from tools.external_detector.safe_io import safe_load_pickle
 
 
 class WaymoObjectDataPrepare():
@@ -17,9 +22,11 @@ class WaymoObjectDataPrepare():
     Function:
         Prepare data infos used for refining module
     """
-    def __init__(self, class_name, root_path=None, split='train', track_data_path=None,
-                 enlarge_scale=1.1, crop_on_bev=False, workers=1, logger=None):
-        
+    def __init__(self, class_name, root_path=None, output_root=None, split='train',
+                 track_data_path=None, enlarge_scale=1.1, crop_on_bev=False,
+                 workers=1, logger=None):
+        if root_path is None:
+            raise ValueError('root_path is required')
         self.class_name = class_name
         self.root_path = root_path
         self.split = split
@@ -31,7 +38,8 @@ class WaymoObjectDataPrepare():
         self.logger = logger
         
         self.processed_infos = {}
-        self.save_path = os.path.join(root_path, 'refining', class_name)
+        output_root = output_root or os.path.join(root_path, 'refining')
+        self.save_path = os.path.join(output_root, class_name)
         if not os.path.exists(self.save_path):
             os.makedirs(self.save_path)
 
@@ -42,8 +50,7 @@ class WaymoObjectDataPrepare():
             dict (sequence_id as keys), and corresponding infos
         """        
         self.logger.info('Loading generated object tracks for %s set.' % self.split)
-        with open(self.tk_data_path, 'rb') as f:
-            waymo_infos = pickle.load(f)
+        waymo_infos = safe_load_pickle(self.tk_data_path)
         
         seq_names = list(waymo_infos.keys())
         waymo_infos = [{seq: waymo_infos[seq]} for seq in seq_names]
@@ -270,7 +277,7 @@ class WaymoObjectDataPrepare():
                     torch.from_numpy(pts[:, :3]).unsqueeze(dim=0).float().cuda(),
                     torch.from_numpy(boxes_enlarge).unsqueeze(dim=0).float().cuda()
                 ).long().squeeze(dim=0).cpu().numpy()
-                obj_pts_mask = obj_pts_mask.astype(np.bool)
+                obj_pts_mask = obj_pts_mask.astype(bool)
 
             for idx, obj_id in enumerate(frm_info['obj_id']):
                 if obj_id not in data_info: 
@@ -341,12 +348,12 @@ if __name__ == '__main__':
                         help='whether to use multi-process preparation')
     parser.add_argument('--track_data_path', type=str, default=None,
                         help='the generated tracking results pickle file')
+    parser.add_argument('--root_path', type=str, required=True,
+                        help='Waymo preprocessing root used only for LiDAR input')
+    parser.add_argument('--output_root', type=str, required=True,
+                        help='fresh root for per-class refining inputs')
     args = parser.parse_args()
 
-    if args.split not in args.track_data_path:
-        raise ValueError('The object tracks data does not match the dataset split.')
-
-    ROOT_DIR = (Path(__file__).resolve().parent / '../').resolve()
     logger = create_logger()
 
     class_names = ['Vehicle', 'Pedestrian', 'Cyclist']
@@ -355,7 +362,8 @@ if __name__ == '__main__':
         logger.info('Start to process %s data ...' % class_name)
         dataset = WaymoObjectDataPrepare(
             class_name=class_name,
-            root_path=os.path.join(ROOT_DIR, 'data', 'waymo'),
+            root_path=args.root_path,
+            output_root=args.output_root,
             split=args.split,
             track_data_path=args.track_data_path,
             enlarge_scale=args.enlarge_scale,

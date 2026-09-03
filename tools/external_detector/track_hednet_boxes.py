@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
-"""T1: constant-velocity + Hungarian BEV gating on HEDNet lidar-frame boxes;
-smoothed truth output in the S2 frame schema.
+"""T1: BEV tracker on HEDNet lidar-frame boxes; smoothed truth output.
 
-No learned weights, no DetZero cfg: motion comes from HEDNet vx/vy, dt from
-real timestamps, gating from physical class sizes. Dimension smoothing =
-score-weighted median per track; centers/heading/velocity pass through per
-frame (they are the detector's own, already at 0.74/0.83 mAP quality).
+Revision v2 (measured evidence): association uses a per-class constant-velocity
+Kalman filter (filterpy, MIT) in the GLOBAL frame with a chi-square Mahalanobis
+gate. v1 used EMA finite-difference velocity + fixed metric gates sized 2-5m;
+measured 2Hz inter-frame detector jitter (median 2.4-3.3m, p90 3.3-4.8m by
+class) exceeds those gates, which fragmented 78-98% of Ped/Cyc tracks into
+single frames. The covariance-scaled gate also grows correctly over missed
+frames, which a fixed radius cannot.
+
+No learned weights, no DetZero/Waymo cfg. HEDNet vx/vy is NOT used for
+association (measured ~31deg median angle error vs GT motion); it is passed
+through into the output boxes as a label attribute. Dimension smoothing =
+per-track score-weighted median (l,w,h); centers/heading pass through.
 """
 
 from __future__ import annotations
@@ -13,13 +20,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 from pathlib import Path
+import os
 import pickle
 import sys
 import uuid
 
 import numpy as np
+from filterpy.kalman import KalmanFilter
 from scipy.optimize import linear_sum_assignment
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -27,10 +35,18 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from tools.external_detector.pipeline import rename_noreplace
 
-# gate radius in metres on extrapolated BEV center distance. Sized from the
-# MEASURED detector inter-frame jitter (adjacent-frame same-object center
-# displacement 2-5m at 2Hz), not from physical object size.
-GATES = {"Vehicle": 6.0, "Cyclist": 3.0, "Pedestrian": 2.0}
+# Per-class measurement noise sigma [m]: sqrt(halved) of measured adjacent-frame
+# jitter of the SAME GT object (Veh 3.0 / Ped 2.4 / Cyc 3.3 median -> ~2.1/1.7/2.3
+# per-box sigma); rounded up one step, 2.0..2.5m.
+# Process noise = accel sigma [m/s^2] over the real dt (Veh accelerate slowly
+# relative to 0.5s frames, VRUs change direction faster).
+CLASS_NOISE = {
+    "Vehicle": {"r_m": 2.5, "a_mps2": 1.0},
+    "Cyclist": {"r_m": 2.5, "a_mps2": 1.5},
+    "Pedestrian": {"r_m": 2.0, "a_mps2": 1.5},
+}
+# chi2 df=2 quantiles: 9.21 = 99%, 16 = 99.97%. Gating on extrapolation error.
+DEFAULT_GATE_CHI2 = 9.21
 BIG = 1e6
 
 
@@ -46,11 +62,31 @@ def lidar_to_global(boxes, pose):
     return centers[:, :3], yaws, v3[:, :2]
 
 
-def weighted_median(values, weights):
-    order = np.argsort(values)
-    cum = np.cumsum(weights[order]) / max(weights[order].sum(), 1e-16)
-    idx = np.searchsorted(cum, 0.5, side="left").clip(max=len(values) - 1)
-    return float(values[order][idx])
+def cv_filter(pos, r_m, a_mps2):
+    """4-state [x, y, vx, vy] CV Kalman at measurement time; v unknown -> wide."""
+    kf = KalmanFilter(dim_x=4, dim_z=2)
+    kf.x = np.array([[pos[0]], [pos[1]], [0.0], [0.0]])
+    kf.H = np.array([[1., 0., 0., 0.], [0., 1., 0., 0.]])
+    kf.R[:] = 0.0
+    kf.R[0, 0] = kf.R[1, 1] = r_m ** 2
+    kf.P[:] = 0.0
+    kf.P[:2, :2] = np.eye(2) * r_m ** 2
+    kf.P[2:, 2:] = np.eye(2) * (5.0 ** 2)  # allow up to ~5 m/s at birth
+    kf.F = np.eye(4)
+    kf.Q = np.eye(4)
+    kf._r_m, kf._a = r_m, a_mps2
+    return kf
+
+
+def predict(kf, dt):
+    kf.F[0, 2] = kf.F[1, 3] = dt
+    a2 = kf._a ** 2
+    q = np.array([[a2 * dt ** 3 / 3, 0, a2 * dt ** 2 / 2, 0],
+                  [0, a2 * dt ** 3 / 3, 0, a2 * dt ** 2 / 2],
+                  [a2 * dt ** 2 / 2, 0, a2 * dt, 0],
+                  [0, a2 * dt ** 2 / 2, 0, a2 * dt]])
+    kf.Q = q
+    kf.predict()
 
 
 def parse_args() -> argparse.Namespace:
@@ -61,58 +97,63 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--output-tracks", type=Path, required=True)
     ap.add_argument("--max-age", type=int, default=3,
                     help="drop a track after this many consecutive missed frames")
+    ap.add_argument("--gate-chi2", type=float, default=DEFAULT_GATE_CHI2)
+    ap.add_argument("--r-scale", type=float, default=1.0,
+                    help="multiplier on per-class measurement sigma (grid search)")
     return ap.parse_args()
 
 
-def track_frames(frames, max_age):
-    """Motion model = EMA finite-difference velocity in the global frame.
-
-    HEDNet vx/vy is NOT used for association: measured against GT-derived
-    motion it carries a ~31 deg median angle error and produced more ID
-    switches than plain position extrapolation. It is still passed through
-    into the output boxes as a label attribute.
-    """
-    tracks, next_id = {}, 0
+def track_frames(frames, max_age, gate_chi2, r_scale):
+    tracks = {}  # tid -> dict(cls, kf, t_us, last_frame, obs)
+    next_id = 0
     for f in frames:
         fid, ts = int(f["frame_id"]), int(f["timestamp"])
         boxes = np.asarray(f["boxes_lidar"], np.float64)
         names = np.asarray(f["name"]).tolist()
-        centers_g, _, vels_g = lidar_to_global(boxes, np.asarray(f["pose"], np.float64))
-        for tid, tr in tracks.items():
+        centers_g, _, _ = lidar_to_global(boxes, np.asarray(f["pose"], np.float64))
+        for tr in tracks.values():
             tr["stale"] = fid - tr["last_frame"] - 1 > max_age
         used = set()
-        for cls in GATES:
+        for cls, noise in CLASS_NOISE.items():
             det_idx = [i for i, n in enumerate(names) if str(n) == cls]
             tr_ids = [t for t, tr in tracks.items()
                       if tr["cls"] == cls and not tr["stale"]]
             if det_idx and tr_ids:
-                dt = np.array([(ts - tracks[t]["t_us"]) / 1e6 for t in tr_ids])[:, None]
-                pred = np.array([tracks[t]["c_g"][:2] for t in tr_ids]) \
-                    + np.array([tracks[t]["vel"] for t in tr_ids]) * dt
-                cost = np.linalg.norm(centers_g[det_idx][:, None, :2] - pred[None], axis=2)
-                cost = np.where(cost <= GATES[cls], cost, BIG)
+                cost = np.full((len(det_idx), len(tr_ids)), BIG)
+                for c, tid in enumerate(tr_ids):
+                    tr = tracks[tid]
+                    predict(tr["kf"], max((ts - tr["t_us"]) / 1e6, 1e-3))
+                    pred = tr["kf"].x[:2].ravel()
+                    S = (tr["kf"].P[:2, :2] + tr["kf"].R)  # innovation cov (H=[I|0])
+                    inv = np.linalg.inv(S)
+                    d = centers_g[det_idx][:, :2] - pred
+                    cost[:, c] = np.einsum("ij,jk,ik->i", d, inv, d)
                 rows, cols = linear_sum_assignment(cost)  # rows=dets, cols=tracks
                 for r, c in zip(rows, cols):
-                    if cost[r, c] >= BIG:
+                    if cost[r, c] > gate_chi2:
                         continue
                     di = det_idx[r]
                     tr = tracks[tr_ids[c]]
-                    dt_s = max((ts - tr["t_us"]) / 1e6, 1e-3)
-                    tr["vel"] = 0.5 * tr["vel"] \
-                        + 0.5 * (centers_g[di][:2] - tr["c_g"][:2]) / dt_s
-                    tr.update(c_g=centers_g[di], t_us=ts,
-                              last_frame=fid, hits=tr["hits"] + 1)
+                    tr["kf"].update(centers_g[di][:2])
+                    tr.update(t_us=ts, last_frame=fid)
                     tr["obs"].append((fid, di))
                     used.add(di)
             for di in det_idx:
                 if di in used:
                     continue
-                tracks[next_id] = {"cls": cls, "c_g": centers_g[di],
-                                   "vel": np.zeros(2), "t_us": ts,
-                                   "last_frame": fid, "hits": 1,
-                                   "obs": [(fid, di)], "stale": False}
+                kf = cv_filter(centers_g[di][:2], noise["r_m"] * r_scale, noise["a_mps2"])
+                tracks[next_id] = {"cls": cls, "kf": kf, "t_us": ts,
+                                   "last_frame": fid, "obs": [(fid, di)],
+                                   "stale": False}
                 next_id += 1
-    return tracks
+    return {tid: tr for tid, tr in tracks.items()}
+
+
+def weighted_median(values, weights):
+    order = np.argsort(values)
+    cum = np.cumsum(weights[order]) / max(weights[order].sum(), 1e-16)
+    idx = np.searchsorted(cum, 0.5, side="left").clip(max=len(values) - 1)
+    return float(values[order][idx])
 
 
 def main() -> int:
@@ -122,7 +163,7 @@ def main() -> int:
     det_boxes = [np.asarray(f["boxes_lidar"], np.float64) for f in frames]
     det_scores = [np.asarray(f["score"], np.float64) for f in frames]
 
-    tracks = track_frames(frames, args.max_age)
+    tracks = track_frames(frames, args.max_age, args.gate_chi2, args.r_scale)
 
     # per-track score-weighted median dimensions (l,w,h): the only "optimization"
     dims = {}
@@ -186,7 +227,9 @@ def main() -> int:
         s["longest"] = max(s["longest"], len(tr["obs"]))
     print(json.dumps({"scene_name": seq, "frame_count": len(out),
                       "track_count": len(tracks), "max_age": args.max_age,
-                      "gates_m": GATES, "per_class": stats,
+                      "motion_model": "cv-kalman-v2", "gate_chi2": args.gate_chi2,
+                      "r_scale": args.r_scale,
+                      "per_class": stats,
                       "output_frames_sha256": _sha(args.output_frames),
                       "output_tracks_sha256": _sha(args.output_tracks)}, sort_keys=True))
     return 0

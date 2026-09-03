@@ -172,6 +172,8 @@ $P tools/external_detector/render_waymo_sequence.py \
 
 ### 5.2 设计（纯 numpy/scipy，无任何学习组件）
 
+> **20260903 v2 修订**：本节固定门限+差分速度按实测碎片化率过高（0103 行人 78% 单帧轨迹），实现已升级为 filterpy CV-Kalman + 卡方马氏门限（同口径 obs/track 2.37→11.03，1帧轨迹 73%→5%，mAP 不变）。证据与数字见完成报告 §9。
+
 新脚本 `tools/external_detector/track_hednet_boxes.py`（T1，~150 行），SORT 式恒速跟踪：
 
 - **运动模型**：直接用 HEDNet 框自带的 vx/vy（lidar 系）做恒速外推 `x+vx·dt`，dt 取 S1 info 的真实时间戳差（2Hz≈0.5s），零拟合参数。

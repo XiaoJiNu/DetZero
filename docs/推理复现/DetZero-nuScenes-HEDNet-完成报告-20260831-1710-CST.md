@@ -85,3 +85,47 @@ GT 量级（scene-0103）：Vehicle 866 / Pedestrian 857 / Cyclist 47 框。dete
 产物：`scene-*/track/hednet_tracked_frames_*.pkl`（**真值输出**，schema 同 S2 帧列表，含逐帧框+轨迹号）+ `hednet_tracks_*.pkl`（按目标组织）+ `eval_metric_report_selftrack.json` + `visuals-selftrack/`（81 张）。GRM/PRM/CRM 未运行。
 
 诚实边界：0103 行人碎片化仍偏多（persistent GT 71 个中 32 个被切成 ≥4 段、长轨迹 ID switch 56/103）——2Hz + detector 抖动下无外观特征的纯几何跟踪的固有上限；真值框质量不受影响（mAP/尺寸已证），受影响的仅是轨迹 ID 连续性。需要更稳 ID 时再上外观特征（方案 §5 范围外）。
+
+---
+
+## 9. 增补（20260903）：T1 跟踪升级 v2 — Kalman + 卡方门限，按实测碎片化根因修正
+
+**触发**：用户查看 `output/nus-stage-a-20260831-165710-CST` 后反馈"跟踪后的结果很差"。
+
+**先澄清看到的对象**：该目录同一 scene 下并存 5 套"跟踪输出"，质量天差地别：
+
+| 目录 | 内容 | 每帧均框数(0103) | 状态 |
+| --- | --- | --- | --- |
+| `tracking/` `refining/` `final/`(含 `-dt05`) | 废弃的 Waymo tracking+GRM/PRM 链（§3，已被 R1 判负） | **3.8** | 仅存档，勿当真值 |
+| `track/`（v1 自研 T1） | §5 自研轻量跟踪（EMA 差分速度+固定门限） | 69.2 | 被 v2 取代（见下） |
+| `track-v2/`（本次新增） | T1 v2：Kalman CV + 卡方马氏门限 | 69.2 | **现行真值输出** |
+
+用户看到的"很差"即 `final/`（Waymo 链输出）——该链在修订路线 §5 中已明确砍掉，其产物不是交付物。
+
+**v1 的量化缺陷**（本次诊断 `_diag_gt_tracks.py`/`_diag_gate.py`）：
+- v1 固定门限（Veh 6 / Ped 2 / Cyc 3 m）低于实测：同目标相邻帧原始位移中位数 Veh 3.0~3.3 / Ped 2.1~2.8 / Cyc 3.3 m，而 EMA 差分外推残差 p90 达 3.4~5.7 m → 高频断链。
+- 结果：0103 Cyclist 98%、Pedestrian 78% 的轨迹只有 1 帧（v1 stats：Ped 883 条轨迹承载 1540 个观测，obs/track=1.7）。
+
+**v2 改动**（`track_hednet_boxes.py`，纯 numpy + filterpy1.4.5(MIT，mv2d 已装)）：
+- 关联改为每类 CV-Kalman（filterpy）在全局系的**马氏距离** + 卡方门限（df=2，χ²=9.21≈99%），门限随丢帧数自动放宽（P 阵增长），固定半径做不到；
+- 量测噪声/过程噪声按上表实测抖动标定（R: V/C 2.5、P 2.0 m；Q: 加速度 V 1.0、P/C 1.5 m/s²）；匈牙利分配不变；
+- 输出合同、尺寸中值平滑、vx/vy 直通均不变。
+- 造轮子核查（用户要求优先找库）：唯一标准实现 AB3DMOT（3D KF+匈牙利，与本需求逐字对应）许可为 **CMU 非商用学术协议，不可引入**（nuScenes 场景亦受其非商用条款约束，与本项目商用真值定位冲突）；CenterPoint 的跟踪即"最近点贪心匹配"（≈v1 思路，已被实测否定）；最终复用已装的 filterpy（MIT）内核 + scipy 分配，新代码只有关联逻辑本身。
+
+**结果（同口径对比，obs/track 与 1 帧轨迹占比）**：
+
+| scene | 版本 | 轨迹数 | obs/track | 1帧轨迹 | ≥10帧轨迹 | mAP(G3') |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0103 | v1 | 1168 | 2.37 | 73% | 69 | 0.743 |
+| 0103 | **v2** | **251** | **11.03** | **5%** | **119** | 0.743 PASS |
+| 0916 | v1 | 574 | 4.56 | 53% | 79 | 0.826 |
+| 0916 | **v2** | **198** | **13.21** | **12%** | **104** | 0.826 PASS |
+
+GT 对拍口径（`_diag_gt_tracks.py`）：detector→GT 关联率 66%/81% 为质量天花板（检测器本身的漏检+2Hz 抖动），v2 的长轨迹不再把同一目标切碎。逐帧框内容与 detector 完全一致（mAP、中心、yaw 直通），跟踪只改 ID 与尺寸平滑——**真值框质量不受跟踪环节损害，轨迹连续性提升 4~5 倍**。
+
+**诚实边界**：
+- 无外观特征的纯几何跟踪在遮挡/交叉处仍有 ID 混淆上限（v2 长轨迹与 GT-ID 纯度对拍 ~96% 存在"最近邻口径"污染，未逐例人审）；根治需 ReID 外观特征（超出 §5 范围）。
+- 官方 nuScenes tracking 评估（AMOTA）本应加为旁证，但本机 devkit 与 motmetrics 1.4.0/pandas 2.2 不兼容（`pred_frequencies` 断链 + 空 MultiIndex），旁路尝试已放弃并删除脚本；如需正式 AMOTA，需钉 motmetrics==0.9.9 的隔离环境，属发布化工作。
+- 参数网格（r_scale∈{0.8,1,1.4}×χ²∈{9.21,16}）显示 0103 行人 1 帧轨迹占比在所有设置下 ≤2%（v1 的 78% 是模型问题非参数噪声），取 rs=1.0/χ²=9.21 居中值。
+
+**产物**：`scene-*/track-v2/hednet_tracked_frames_*.pkl`（真值）+ `hednet_tracks_*.pkl` + `eval_metric_report_trackv2.json`（三级 mAP）+ `visuals-trackv2/`（81 张 BEV，逐帧非空，40/41 帧）。自检查：`tests/test_track_hednet_v2.py`（合成 2Hz 双目标，断言 0 碎片/0 丢观测/0 串轨，PASS）。

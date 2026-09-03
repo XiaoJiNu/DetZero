@@ -20,3 +20,12 @@ venv/
 *version.py
 *.npy
 *.DS_Store
+
+# large / vendor intermediates (track-gt)
+output/
+third_party/SimpleTrack/
+*.egg-info/
+mot_3d.egg-info/
+
+# keep small samples optional via force-add
+!docs/**/*.md

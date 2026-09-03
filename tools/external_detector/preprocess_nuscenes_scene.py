@@ -91,8 +91,14 @@ def main() -> int:
             points[:, 5] = -1.0
             # car_from_global = global->ego, ref_from_car = ego->lidar (verified
             # exactly against the devkit tables, risk R3): pose = lidar->global.
-            g2l = np.asarray(m["car_from_global"], dtype=np.float64) @ \
-                np.asarray(m["ref_from_car"], dtype=np.float64)
+            # NOTE 2026-09-03: composition order FIXED. The global->lidar chain
+            # is ref_from_car @ car_from_global (ego->lidar AFTER global->ego);
+            # the previous swap produced a frame-wise inconsistent "pseudo
+            # global" (~2 km off). Measured on all 81 v1.0-mini val frames:
+            # corrected err vs devkit 3.4e-12, old order err ~2.0e3 m.
+            # See tools/nustack/__init__.py + tests/test_nustack_pose.py.
+            g2l = np.asarray(m["ref_from_car"], dtype=np.float64) @ \
+                np.asarray(m["car_from_global"], dtype=np.float64)
             pose = np.ascontiguousarray(np.linalg.inv(g2l))
             yield {
                 "frame_id": frame_id,

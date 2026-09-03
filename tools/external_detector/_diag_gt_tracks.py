@@ -15,7 +15,7 @@ MAP = {c: k for k, v in CLASSES.items() for c in v}
 def gt_global(m):
     b = np.array(m['gt_boxes'])
     names = np.array(m['gt_names'])
-    pose = np.linalg.inv(np.array(m['car_from_global']) @ np.array(m['ref_from_car']))  # lidar->global
+    pose = np.linalg.inv(np.array(m['ref_from_car']) @ np.array(m['car_from_global']))  # lidar->global
     R, t = pose[:3, :3], pose[:3, 3]
     ok = np.array([x in MAP for x in names]) & (np.array(m['num_lidar_pts']) > -1)
     p = b[ok, :3] @ R.T + t

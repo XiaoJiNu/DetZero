@@ -20,3 +20,7 @@ venv/
 *version.py
 *.npy
 *.DS_Store
+
+# local run artifacts (do not upload)
+output/
+checkpoints

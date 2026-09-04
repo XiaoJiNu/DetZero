@@ -3,8 +3,8 @@
 | 字段 | 内容 |
 | --- | --- |
 | 作者 / 助手 | **grok**（算法复现） |
-| 文档创建时间 | 2026-09-04 13:29:42 CST（2026-09-04T05:29:42Z） |
-| 文档版本 | v1.0 |
+| 文档创建时间 | **修订** 2026-09-04 14:18:44 CST（初版 2026-09-04 13:29:42 CST）|
+| 文档版本 | v1.1|
 | 工作区 | `/data/code/cv/AutoLabel/DetZero-nuscenes-simpletrack-trackgt` |
 | Git 分支 | `nuscenes-mapping-surroundocc`（自 tip `acef8d7`） |
 | 产品目标 | 离线场景点云建图：静态背景 + 动态物体致密（对齐末帧 LiDAR） |
@@ -15,6 +15,7 @@
 | 时间 (CST) | 作者 | 版本 | 变更摘要 |
 | --- | --- | --- | --- |
 | 2026-09-04 13:29:42 CST | grok | v1.0 | 初版定稿：官方 nuScenes 位姿；SurroundOcc 静/动分离；HEDNet+SimpleTrack 框与 track_id；累积到末帧 LiDAR；物体局部致密后按末框位姿放置；可选 Open3D Poisson；不重跑 SLAM/KISS-ICP |
+| 2026-09-04 14:18:44 CST | grok | v1.1 | 默认融合全部 LIDAR_TOP sweeps（框在关键帧间插值）；CLI `--use-sweeps` / `--keyframes-only`；`--poisson` 实跑 scene-0103/0916；详见增强报告 |
 
 > 后续每次修正：在本表追加一行，并同步文首「文档版本 / 文档创建或修订时间」。文件名时间戳保留首次创建时刻。
 
@@ -45,8 +46,8 @@
 | 框来源 | 官方 `sample_annotation` + `instance_token` | HEDNet+SimpleTrack `tracking_id` |
 | 参考系 | 先对齐到**首帧** LiDAR，再对每个关键帧变到该帧 | 直接累积到**末关键帧** LiDAR |
 | 动态放置 | 每个关键帧用**该帧**框位姿放回 | 只在末帧地图中，用**末次可见（优先末帧）**框位姿放一次 |
-| 中间 sweep | 沿 `sample_data.next` 含非关键帧 | **仅 keyframe sample**（与跟踪 JSON 对齐） |
-| Poisson | 默认做，再体素化占用 | **默认关**；可选仅静态 |
+| 中间 sweep | 沿 `sample_data.next` 含非关键帧 | **默认含全 sweep**（`--use-sweeps`）；`--keyframes-only` 可退回仅关键帧；非关键帧框由相邻关键帧插值 |
+| Poisson | 默认做，再体素化占用 | **默认关**；`--poisson` / `--poisson-depth` 可选仅静态 |
 | 语义 / 占用网格 | lidarseg + 0.5 m 占用 | 本阶段只出点云地图 |
 
 ### 1.4 端到端数据流
@@ -119,7 +120,7 @@ tracking_results.json (global boxes + tracking_id)     │
 
 ### 2.4 静态融合
 
-- 每帧静态点：先到 global，再到 **末关键帧 LiDAR**。
+- 每帧（默认含全部 lidar sweep）静态点：先到 global，再到 **末关键帧 LiDAR**。
 - 全场景 `concatenate` 后 **voxel_down_sample(0.1 m)**（Open3D）控制体积。
 - 可选 `--poisson`：仅对静态估计法向 + Poisson，导出 mesh 顶点或网格；**默认关闭**以保证速度。
 
@@ -169,6 +170,8 @@ output/mapping-<stamp>-CST/
   --version v1.0-mini \
   --tracking-json output/track-gt-20260903-155401-CST/delivery/tracking_results.json \
   --scenes scene-0103,scene-0916 \
+  --use-sweeps \
+  --poisson \
   --voxel-size 0.1 \
   --box-expand 1.1 \
   --out-dir output/mapping-<stamp>-CST
@@ -177,7 +180,7 @@ output/mapping-<stamp>-CST/
 ### 2.8 风险与诚实边界
 
 - 跟踪漏检/错 ID → 动态点漏进静态，或同一物体碎成多团。
-- 仅 keyframe（2 Hz）→ 致密弱于 SurroundOcc「含中间 sweep」。
+- 默认已含中间 sweep；若用 `--keyframes-only`（2 Hz）则致密弱于 SurroundOcc 全链。
 - 扩框 1.1 仍可能切掉物体边缘或吞掉路边静态。
 - 官方位姿在 mini 上通常足够；若出现重影，优先查跟踪框而非先上 SLAM。
 - Poisson 慢且易填洞过度；默认关闭是有意的。

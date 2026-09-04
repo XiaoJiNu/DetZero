@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 from nuscenes.nuscenes import NuScenes
 from nuscenes.utils.data_classes import LidarPointCloud
+from pyquaternion import Quaternion
 
 from geometry import (
     global_to_lidar,
@@ -35,9 +36,32 @@ def list_sample_tokens(nusc: NuScenes, scene: dict) -> List[str]:
     return tokens
 
 
+def list_lidar_sample_data_tokens(nusc: NuScenes, scene: dict) -> List[str]:
+    """Walk LIDAR_TOP sample_data chain (all sweeps + keyframes) for a scene."""
+    first_sample = nusc.get("sample", scene["first_sample_token"])
+    sd_tok = first_sample["data"]["LIDAR_TOP"]
+    # rewind to start of chain
+    while True:
+        sd = nusc.get("sample_data", sd_tok)
+        if not sd["prev"]:
+            break
+        sd_tok = sd["prev"]
+    tokens = []
+    while sd_tok:
+        tokens.append(sd_tok)
+        sd_tok = nusc.get("sample_data", sd_tok)["next"]
+    return tokens
+
+
 def load_lidar_points(nusc: NuScenes, sample_token: str) -> Tuple[np.ndarray, dict, dict, str]:
     sample = nusc.get("sample", sample_token)
     sd_token = sample["data"]["LIDAR_TOP"]
+    return load_lidar_points_from_sd(nusc, sd_token)
+
+
+def load_lidar_points_from_sd(
+    nusc: NuScenes, sd_token: str
+) -> Tuple[np.ndarray, dict, dict, str]:
     sd = nusc.get("sample_data", sd_token)
     path = nusc.get_sample_data_path(sd_token)
     pc = LidarPointCloud.from_file(path)
@@ -56,6 +80,117 @@ def pose_mats(cs: dict, pose: dict):
     )
 
 
+def _box_by_tid(boxes: List[dict]) -> Dict[str, dict]:
+    out: Dict[str, dict] = {}
+    for b in boxes:
+        tid = str(b["tracking_id"])
+        out[tid] = b
+    return out
+
+
+def interpolate_tracking_boxes(
+    boxes_a: List[dict],
+    boxes_b: List[dict],
+    t: float,
+    ta: float,
+    tb: float,
+) -> List[dict]:
+    """Interpolate boxes between keyframes A (ta) and B (tb) at timestamp t.
+
+    Match by tracking_id. translation/size: lerp; rotation: Quaternion.slerp.
+    If track only on one side: use that side's box.
+    """
+    if tb == ta:
+        alpha = 0.0
+    else:
+        alpha = float(np.clip((t - ta) / (tb - ta), 0.0, 1.0))
+
+    map_a = _box_by_tid(boxes_a)
+    map_b = _box_by_tid(boxes_b)
+    tids = set(map_a) | set(map_b)
+    out: List[dict] = []
+    for tid in tids:
+        ba = map_a.get(tid)
+        bb = map_b.get(tid)
+        if ba is not None and bb is not None:
+            ta_arr = np.asarray(ba["translation"], dtype=np.float64)
+            tb_arr = np.asarray(bb["translation"], dtype=np.float64)
+            sa = np.asarray(ba["size"], dtype=np.float64)
+            sb = np.asarray(bb["size"], dtype=np.float64)
+            qa = Quaternion(ba["rotation"])
+            qb = Quaternion(bb["rotation"])
+            q = Quaternion.slerp(qa, qb, amount=alpha)
+            interp = {
+                "tracking_id": tid,
+                "tracking_name": ba.get("tracking_name") or bb.get("tracking_name", ""),
+                "translation": (ta_arr * (1.0 - alpha) + tb_arr * alpha).tolist(),
+                "size": (sa * (1.0 - alpha) + sb * alpha).tolist(),
+                "rotation": [q.w, q.x, q.y, q.z],
+            }
+            if "tracking_score" in ba or "tracking_score" in bb:
+                sa_sc = float(ba.get("tracking_score", bb.get("tracking_score", 0.0)))
+                sb_sc = float(bb.get("tracking_score", ba.get("tracking_score", 0.0)))
+                interp["tracking_score"] = sa_sc * (1.0 - alpha) + sb_sc * alpha
+            if "velocity" in ba or "velocity" in bb:
+                va = np.asarray(ba.get("velocity", bb.get("velocity", [0.0, 0.0])), dtype=np.float64)
+                vb = np.asarray(bb.get("velocity", ba.get("velocity", [0.0, 0.0])), dtype=np.float64)
+                interp["velocity"] = (va * (1.0 - alpha) + vb * alpha).tolist()
+            out.append(interp)
+        elif ba is not None:
+            # prefer nearest side when only one exists
+            out.append(dict(ba))
+        else:
+            out.append(dict(bb))
+    return out
+
+
+def build_keyframe_timeline(
+    nusc: NuScenes,
+    sample_tokens: Sequence[str],
+    tracking_results: Dict[str, List[dict]],
+) -> List[Dict[str, Any]]:
+    """List of {ts, sample_token, boxes} for each keyframe, sorted by timestamp."""
+    timeline = []
+    for stok in sample_tokens:
+        sample = nusc.get("sample", stok)
+        timeline.append(
+            {
+                "ts": int(sample["timestamp"]),
+                "sample_token": stok,
+                "boxes": list(tracking_results.get(stok, [])),
+            }
+        )
+    timeline.sort(key=lambda x: x["ts"])
+    return timeline
+
+
+def _boxes_at_timestamp(
+    timeline: List[Dict[str, Any]],
+    t: int,
+) -> Tuple[List[dict], Optional[str], bool]:
+    """Return (boxes, exact_keyframe_sample_token_or_None, is_exact_keyframe)."""
+    if not timeline:
+        return [], None, False
+    # exact match
+    for kf in timeline:
+        if kf["ts"] == t:
+            return kf["boxes"], kf["sample_token"], True
+    # before first / after last
+    if t <= timeline[0]["ts"]:
+        return timeline[0]["boxes"], None, False
+    if t >= timeline[-1]["ts"]:
+        return timeline[-1]["boxes"], None, False
+    # find bracketing keyframes
+    for i in range(len(timeline) - 1):
+        a, b = timeline[i], timeline[i + 1]
+        if a["ts"] <= t <= b["ts"]:
+            boxes = interpolate_tracking_boxes(
+                a["boxes"], b["boxes"], float(t), float(a["ts"]), float(b["ts"])
+            )
+            return boxes, None, False
+    return timeline[-1]["boxes"], None, False
+
+
 def build_scene_map(
     nusc: NuScenes,
     scene_name: str,
@@ -67,6 +202,7 @@ def build_scene_map(
     use_poisson: bool = False,
     poisson_depth: int = 9,
     write_pcd_also: bool = True,
+    use_sweeps: bool = True,
 ) -> Dict[str, Any]:
     t0 = time.time()
     scene = None
@@ -83,6 +219,7 @@ def build_scene_map(
     sample_tokens = list_sample_tokens(nusc, scene)
     if not sample_tokens:
         raise RuntimeError(f"no samples in {scene_name}")
+    n_keyframes = len(sample_tokens)
 
     last_token = sample_tokens[-1]
     _, cs_last, pose_last, sd_last = load_lidar_points(nusc, last_token)
@@ -91,20 +228,65 @@ def build_scene_map(
     static_chunks: List[np.ndarray] = []
     # track_id -> list of local points
     object_local: Dict[str, List[np.ndarray]] = defaultdict(list)
-    # track_id -> list of (frame_idx, box_dict)
-    track_boxes: Dict[str, List[Tuple[int, dict]]] = defaultdict(list)
+    # track_id -> list of (frame_idx, box_dict, is_keyframe)
+    track_boxes: Dict[str, List[Tuple[int, dict, bool]]] = defaultdict(list)
     track_names: Dict[str, str] = {}
 
     n_static_raw = 0
     n_dynamic_raw = 0
     frames_meta = []
 
-    for fi, stok in enumerate(sample_tokens):
-        pts_l, cs, pose, sd_tok = load_lidar_points(nusc, stok)
+    if use_sweeps:
+        sd_tokens = list_lidar_sample_data_tokens(nusc, scene)
+        timeline = build_keyframe_timeline(nusc, sample_tokens, tracking_results)
+        frame_iter = []
+        for sd_tok in sd_tokens:
+            sd = nusc.get("sample_data", sd_tok)
+            frame_iter.append(
+                {
+                    "sd_token": sd_tok,
+                    "timestamp": int(sd["timestamp"]),
+                    "is_key_frame": bool(sd["is_key_frame"]),
+                    "sample_token": sd["sample_token"],
+                }
+            )
+    else:
+        frame_iter = []
+        for stok in sample_tokens:
+            sample = nusc.get("sample", stok)
+            sd_tok = sample["data"]["LIDAR_TOP"]
+            sd = nusc.get("sample_data", sd_tok)
+            frame_iter.append(
+                {
+                    "sd_token": sd_tok,
+                    "timestamp": int(sd["timestamp"]),
+                    "is_key_frame": True,
+                    "sample_token": stok,
+                }
+            )
+        timeline = None
+
+    for fi, fr in enumerate(frame_iter):
+        sd_tok = fr["sd_token"]
+        pts_l, cs, pose, _ = load_lidar_points_from_sd(nusc, sd_tok)
         cs_r, cs_t, ego_r, ego_t = pose_mats(cs, pose)
         pts_g = lidar_to_global(pts_l, cs_r, cs_t, ego_r, ego_t)
 
-        objs = tracking_results.get(stok, [])
+        if use_sweeps:
+            if fr["is_key_frame"]:
+                # Keyframe: boxes keyed by this sample_token in tracking JSON
+                stok_meta = fr["sample_token"]
+                objs = tracking_results.get(stok_meta, [])
+                is_kf = True
+            else:
+                objs, exact_stok, _ = _boxes_at_timestamp(timeline, fr["timestamp"])
+                stok_meta = exact_stok if exact_stok else fr["sample_token"]
+                is_kf = False
+        else:
+            stok_meta = fr["sample_token"]
+            objs = tracking_results.get(stok_meta, [])
+            is_kf = True
+
         centers = []
         sizes = []
         rots = []
@@ -113,9 +295,12 @@ def build_scene_map(
             centers.append(o["translation"])
             sizes.append(o["size"])
             rots.append(o["rotation"])
-            tids.append(str(o["tracking_id"]))
-            track_boxes[str(o["tracking_id"])].append((fi, o))
-            track_names[str(o["tracking_id"])] = o.get("tracking_name", "")
+            tid = str(o["tracking_id"])
+            tids.append(tid)
+            # Prefer recording keyframe appearances for placement; still append sweeps
+            # but placement logic below filters to keyframes first.
+            track_boxes[tid].append((fi, o, is_kf))
+            track_names[tid] = o.get("tracking_name", track_names.get(tid, ""))
 
         centers_a = np.asarray(centers, dtype=np.float64).reshape(-1, 3) if centers else np.zeros((0, 3))
         sizes_a = np.asarray(sizes, dtype=np.float64).reshape(-1, 3) if sizes else np.zeros((0, 3))
@@ -131,7 +316,6 @@ def build_scene_map(
             sel = inbox[:, j]
             if not np.any(sel):
                 continue
-            # if point in multiple boxes, still assign to each (SurroundOcc does per-box)
             local = world_to_object_local(pts_g[sel], centers[j], rots[j])
             object_local[tid].append(local)
             n_dynamic_raw += int(sel.sum())
@@ -149,7 +333,10 @@ def build_scene_map(
         frames_meta.append(
             {
                 "frame_idx": fi,
-                "sample_token": stok,
+                "sample_token": stok_meta,
+                "sample_data_token": sd_tok,
+                "is_key_frame": bool(fr["is_key_frame"]),
+                "timestamp": int(fr["timestamp"]),
                 "n_lidar": int(pts_l.shape[0]),
                 "n_boxes": len(objs),
                 "n_static": int(static_mask.sum()),
@@ -168,8 +355,16 @@ def build_scene_map(
     else:
         static_export = static_vox
 
-    # densify dynamics and place at last available box (prefer last frame)
-    last_fi = len(sample_tokens) - 1
+    # densify dynamics and place at last available KEYFRAME box (prefer last keyframe)
+    last_fi = len(frame_iter) - 1
+    # find last keyframe frame index among processed frames
+    last_kf_fi = None
+    for fr_i, fr in enumerate(frame_iter):
+        if fr["is_key_frame"]:
+            last_kf_fi = fr_i
+    if last_kf_fi is None:
+        last_kf_fi = last_fi
+
     dynamic_chunks: List[np.ndarray] = []
     boxes_last: Dict[str, Any] = {}
     tracks_placed = 0
@@ -184,18 +379,27 @@ def build_scene_map(
             tracks_skipped_empty += 1
             continue
 
-        # choose placement box
         appearances = track_boxes.get(tid, [])
         if not appearances:
             tracks_skipped_empty += 1
             continue
-        on_last = [b for (fi, b) in appearances if fi == last_fi]
-        if on_last:
-            place_box = on_last[-1]
-            place_source = "last_frame"
+
+        # Prefer last KEYFRAME appearance for place_box
+        kf_apps = [(fi, b) for (fi, b, is_kf) in appearances if is_kf]
+        if kf_apps:
+            on_last = [b for (fi, b) in kf_apps if fi == last_kf_fi]
+            if on_last:
+                place_box = on_last[-1]
+                place_source = "last_keyframe"
+            else:
+                place_box = kf_apps[-1][1]
+                place_source = f"fallback_keyframe_{kf_apps[-1][0]}"
+            n_frames_seen = len(kf_apps)
         else:
+            # no keyframe appearance: fall back to last sweep appearance
             place_box = appearances[-1][1]
-            place_source = f"fallback_frame_{appearances[-1][0]}"
+            place_source = f"fallback_sweep_{appearances[-1][0]}"
+            n_frames_seen = len(appearances)
 
         placed_g = object_local_to_world(dens, place_box["translation"], place_box["rotation"])
 
@@ -224,7 +428,7 @@ def build_scene_map(
             "place_source": place_source,
             "n_local_points": int(dens.shape[0]),
             "n_placed_points": int(placed_l.shape[0]),
-            "n_frames_seen": len(appearances),
+            "n_frames_seen": n_frames_seen,
         }
 
     if dynamic_chunks:
@@ -266,13 +470,16 @@ def build_scene_map(
     elapsed = time.time() - t0
     manifest = {
         "scene": scene_name,
-        "n_frames": len(sample_tokens),
+        "n_frames": len(frame_iter),
+        "n_keyframes": n_keyframes,
+        "use_sweeps": use_sweeps,
         "first_sample_token": sample_tokens[0],
         "last_sample_token": last_token,
         "box_expand": box_expand,
         "voxel_size": voxel_size,
         "self_range": list(self_range),
         "use_poisson": use_poisson,
+        "poisson_depth": poisson_depth if use_poisson else None,
         "n_static_raw_accumulated": n_static_raw,
         "n_static_after_voxel": n_static,
         "n_dynamic_raw_assigned": n_dynamic_raw,

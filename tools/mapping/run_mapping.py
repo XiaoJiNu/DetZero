@@ -35,8 +35,6 @@ def boxes_to_last_lidar(boxes_last: dict, cs_last: dict, pose_last: dict) -> lis
     for tid, b in boxes_last.items():
         c_g = np.asarray(b["translation"], dtype=np.float64).reshape(1, 3)
         c_l = global_to_lidar(c_g, cs_r, cs_t, ego_r, ego_t)[0]
-        # yaw in lidar ≈ yaw_global - ego_yaw - cs_yaw; for BEV overlay use relative
-        # Approximate: rotate heading by inverse ego*cs
         from pyquaternion import Quaternion
 
         q_box = Quaternion(b["rotation"])
@@ -67,9 +65,22 @@ def main():
     ap.add_argument("--self-range", type=float, nargs=3, default=[3.0, 3.0, 3.0])
     ap.add_argument("--poisson", action="store_true", help="optional Poisson on static")
     ap.add_argument("--poisson-depth", type=int, default=9)
+    ap.add_argument(
+        "--use-sweeps",
+        action="store_true",
+        default=True,
+        help="fuse all LIDAR_TOP sweeps with interpolated boxes (default: True)",
+    )
+    ap.add_argument(
+        "--keyframes-only",
+        action="store_true",
+        help="disable sweeps; use keyframe samples only",
+    )
     ap.add_argument("--bev-range", type=float, default=50.0)
     ap.add_argument("--no-pcd", action="store_true")
     args = ap.parse_args()
+
+    use_sweeps = False if args.keyframes_only else bool(args.use_sweeps)
 
     repo = Path(__file__).resolve().parents[2]
     stamp = stamp_cst()
@@ -89,7 +100,7 @@ def main():
     scene_summaries = []
     for name in scenes:
         scene_dir = out_root / name
-        print(f"[mapping] {name} -> {scene_dir}")
+        print(f"[mapping] {name} -> {scene_dir} (use_sweeps={use_sweeps}, poisson={args.poisson})")
         man = build_scene_map(
             nusc=nusc,
             scene_name=name,
@@ -101,6 +112,7 @@ def main():
             use_poisson=args.poisson,
             poisson_depth=args.poisson_depth,
             write_pcd_also=not args.no_pcd,
+            use_sweeps=use_sweeps,
         )
 
         with open(scene_dir / "boxes_last.json") as f:
@@ -108,7 +120,6 @@ def main():
         # load last pose for box overlay
         _, cs_last, pose_last, _ = load_lidar_points(nusc, man["last_sample_token"])
         boxes_lidar = boxes_to_last_lidar(bl["boxes"], cs_last, pose_last)
-        # Also dump lidar-frame boxes for debugging overlays
         with open(scene_dir / "boxes_last_lidar.json", "w") as f:
             json.dump({"scene": name, "boxes": boxes_lidar}, f, indent=2)
 
@@ -123,7 +134,9 @@ def main():
             json.dump(man, f, indent=2)
         scene_summaries.append(man)
         print(
-            f"  frames={man['n_frames']} static={man['n_static_after_voxel']} "
+            f"  frames={man['n_frames']} keyframes={man.get('n_keyframes')} "
+            f"use_sweeps={man.get('use_sweeps')} poisson={man.get('use_poisson')} "
+            f"static={man['n_static_after_voxel']} "
             f"dynamic={man['n_dynamic_after_place_voxel']} tracks={man['n_tracks_placed']} "
             f"time={man['elapsed_sec']}s"
         )
@@ -139,11 +152,16 @@ def main():
         "box_expand": args.box_expand,
         "self_range": list(args.self_range),
         "poisson": args.poisson,
+        "poisson_depth": args.poisson_depth if args.poisson else None,
+        "use_sweeps": use_sweeps,
         "elapsed_sec": round(time.time() - t0, 3),
         "scenes_detail": [
             {
                 "scene": m["scene"],
                 "n_frames": m["n_frames"],
+                "n_keyframes": m.get("n_keyframes"),
+                "use_sweeps": m.get("use_sweeps"),
+                "use_poisson": m.get("use_poisson"),
                 "n_static": m["n_static_after_voxel"],
                 "n_dynamic": m["n_dynamic_after_place_voxel"],
                 "n_combined": m["n_combined"],
